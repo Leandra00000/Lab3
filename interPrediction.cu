@@ -417,7 +417,7 @@ void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int 
 
     // Copy data from Host to Device
     cudaMemcpyCheck(d_CurrentBlock, CurrentBlock, SizeCurrentBlock * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_CurrentBlock");
-    //cudaMemcpyCheck(d_SearchArea, SearchArea, SizeSearchArea * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_SearchArea");
+    cudaMemcpyCheck(d_SearchArea, SearchArea, SizeSearchArea * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_SearchArea");
     cudaMemcpyCheck(d_bestResult, bestResult, sizeof(BestResult), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_bestResult");
     
     // Determine kernel launch configuration
