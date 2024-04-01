@@ -40,11 +40,11 @@ typedef struct {
 
 
 /************************************************************************************/
-void getLumaFrame(int** frame_mem, FILE* yuv_file, Parameters p){
+void getLumaFrame(int* frame_mem, FILE* yuv_file, Parameters p){
     int count;
     for(int r=0; r<p.height;r++)
         for(int c=0; c<p.width;c++)
-            count=fread(&(frame_mem[r][c]),1,1,yuv_file);
+           count=fread(&(frame_mem[r*p.width+c]),1,1,yuv_file);
 
     // Skips the color Cb and Cr components in the YUV 4:2:0 file
     fseek(yuv_file,p.width*p.height/2,SEEK_CUR);
@@ -65,19 +65,19 @@ void setLumaFrame(int** frame_mem, FILE* yuv_file, Parameters p){
         }
 }
 /************************************************************************************/
-void reconstruct(int** rec_frame, int** ref_frame, int i, int j, Parameters p, BestResult* MV){
+void reconstruct(int** rec_frame, int* ref_frame, int i, int j, Parameters p, BestResult* MV){
     for(int a=i; a<i+p.blockSize; a++)
         for(int b=j; b<j+p.blockSize; b++)
             if( (0<=a+MV->vec_x) && (a+MV->vec_x<p.height) && (0<=b+MV->vec_y) && (b+MV->vec_y<p.width) )
-                rec_frame[a][b] = ref_frame[a+MV->vec_x][b+MV->vec_y];
+                rec_frame[a][b] = ref_frame[(a+MV->vec_x)*p.width+b+MV->vec_y];
 }
 /************************************************************************************/
-unsigned long long computeResidue(int** res_frame, int** curr_frame, int** rec_frame, Parameters p){
+unsigned long long computeResidue(int** res_frame, int* curr_frame, int** rec_frame, Parameters p){
     unsigned long long accumulatedDifference = 0;
     int difference;
     for(int a=0; a<p.height; a++)
         for(int b=0; b<p.width; b++){
-            difference = curr_frame[a][b] - rec_frame[a][b];
+            difference = curr_frame[a*p.width+b] - rec_frame[a][b];
             if (difference < 0) 
                 difference = - difference;
             if (255 < difference)
@@ -88,30 +88,19 @@ unsigned long long computeResidue(int** res_frame, int** curr_frame, int** rec_f
     return(accumulatedDifference);
 }
 /************************************************************************************/
-void getBlock(int* block, int** frame, int i, int j, Parameters p){
+void getBlock(int* block, int* frame, int i, int j, Parameters p){
     for(int m=0; m<p.blockSize; m++)
         for(int n=0; n<p.blockSize; n++)
-            block[m * p.blockSize + n] = frame[i+m][j+n];
+            block[m*p.blockSize+n] = frame[(i+m)*p.width+j+n];
 }    
 /************************************************************************************/
-void getSearchArea(int* searchArea, int** frame, int i, int j, Parameters p){
+void getSearchArea(int* searchArea, int* frame, int i, int j, Parameters p){
     for(int m=-p.searchRange; m<p.searchRange+p.blockSize; m++)
         for(int n=-p.searchRange; n<p.searchRange+p.blockSize; n++)
             if ( ((0<=(i+m)) && ((i+m)<p.height)) && ((0<=(j+n)) && ((j+n)<p.width)) )
-                searchArea[(p.searchRange + m) * (2 * p.searchRange + p.blockSize) + (p.searchRange + n)] = frame[i+m][j+n];
+                searchArea[(p.searchRange + m) * (2 * p.searchRange + p.blockSize) + (p.searchRange + n)] = frame[(i+m)*p.width+j+n];
             else
                 searchArea[(p.searchRange + m) * (2 * p.searchRange + p.blockSize) + (p.searchRange + n)] = 0; 
-}
-
-bool verifyPsearch(int k, int m, int searchRange) {
-    return (-searchRange <= k) && (k <= searchRange) &&
-           (-searchRange <= m) && (m <= searchRange);
-}
-
-// Function to verify the other four conditions
-bool verifyOtherConditions(int rowIdx, int colIdx, int posX, int posY, int height, int width) {
-    return (0 <= (rowIdx + posX)) && ((rowIdx + posX) < height) &&
-           (0 <= (colIdx + posY)) && ((colIdx + posY) < width);
 }
 /************************************************************************************/
 void SAD(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx, int colIdx, int k, int m, Parameters p){
@@ -129,7 +118,12 @@ void SAD(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx,
         
         for(int i=0; i<p.blockSize; i++){
             for(int j=0; j<p.blockSize; j++){
-                sad += abs(CurrentBlock[i*p.blockSize+j] - SearchArea[(posX+i)*(2*p.searchRange+p.blockSize)+j+posY]);
+                if ( ((0<=(rowIdx+k+i)) && ((0<=(colIdx+m+j) ))))
+                    sad += abs(CurrentBlock[(i+rowIdx)*p.width+(j+colIdx)] - SearchArea[(k+i+rowIdx)*p.width+j+m+colIdx]);
+                else
+                    sad+= abs(CurrentBlock[(i+rowIdx)*p.width+(j+colIdx)]);
+                
+                
             }
         }
         // compares the obtained sad with the best so far for that block
@@ -140,9 +134,9 @@ void SAD(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx,
         }
     }
 }
-    
+
 /************************************************************************************/
-__global__ void SAD_kernel(BestResult* bestResult, int* currentBlock, int* searchArea,int k, int m, Parameters p) {
+__global__ void SAD_kernel(BestResult* bestResult, int* currentBlock, int* searchArea,int rowIdx, int colIdx,int k, int m, Parameters p) {
 
     __shared__ int returnBlock[BLOCK_SIZE];
     unsigned int column = blockIdx.x*blockDim.x + threadIdx.x;
@@ -152,10 +146,10 @@ __global__ void SAD_kernel(BestResult* bestResult, int* currentBlock, int* searc
     int posY = p.searchRange+m;
 
     
-        // computes SAD disparity, by comparing the current block with the reference block at (k,m)
+       
     returnBlock[column] = 0;
     for(i=0; i<p.blockSize;i++){
-        returnBlock[column] += abs(currentBlock[i*p.blockSize+column] - searchArea[(posX+i)*(2*p.searchRange+p.blockSize)+column+posY]);
+        returnBlock[column] += abs(currentBlock[(i+rowIdx)*p.width+(column+colIdx)] - searchArea[(k+i+rowIdx)*p.width+column+m+colIdx]);
     }
 
     unsigned int tid = column;
@@ -177,36 +171,7 @@ __global__ void SAD_kernel(BestResult* bestResult, int* currentBlock, int* searc
     
 }
 
-/************************************************************************************/
-void StepSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx, int colIdx, Parameters p){
-    
-    bestResult->sad = BigSAD; 
-    bestResult->vec_x = 0;
-    bestResult->vec_y = 0;
 
-    // First prediction, at the center of the search area
-    int CenterX=0;
-    int CenterY=0;
-    SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX, CenterY, p);
-
-    // Furthest search center
-    int Distance = (p.searchRange)>>1;  // Initial distance = search range/2
-    while (Distance >= 1) {
-        SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX-Distance, CenterY-Distance, p); // Top-Left
-        SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX-Distance, CenterY+0,        p); // Top-Center
-        SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX-Distance, CenterY+Distance, p); // Top-Right
-        SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX+0       , CenterY-Distance, p); // Center-Left
-        SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX+0       , CenterY+Distance, p); // Center-Right
-        SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX+Distance, CenterY-Distance, p); // Top-Left
-        SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX+Distance, CenterY+0,        p); // Top-Center
-        SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, CenterX+Distance, CenterY+Distance, p); // Top-Right
-        // At this point, (bestResult->vec_x,bestResult->vec_y) marks the best search point and will be considered as the next search center
-        CenterX = bestResult->vec_x;
-        CenterY = bestResult->vec_y;
-        // Divides the search distance by 2
-        Distance >>= 1;
-    }
-}
 /**********************************************************************************/
 BestResult* allocateBestResultOnDevice() {
     BestResult* device_bestResult;
@@ -232,181 +197,16 @@ void cudaMemcpyCheck(void* dst, const void* src, size_t count, cudaMemcpyKind ki
         exit(EXIT_FAILURE);
     }
 }
+
 /************************************************************************************/
-void xTZ8PointDiamondSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx, int colIdx, int centroX, int centroY, int iDist, Parameters p){
-    BestResult localBest;
-    localBest.sad = bestResult->sad;
-    localBest.bestDist = iDist;
-    localBest.vec_x = 0;
-    localBest.vec_y = 0;
-
-    int SizeCurrentBlock = p.blockSize * p.blockSize;
-
-    int SizeSearchArea = (2 * p.searchRange + p.blockSize) * (2 * p.searchRange + p.blockSize);
-   
-
-    int *d_CurrentBlock, *d_SearchArea;
-    BestResult* d_bestResult;
-    int *d_returnBlock;
-    cudaMallocCheck(&d_CurrentBlock, SizeCurrentBlock * sizeof(int), "Failed to allocate memory for d_CurrentBlock");
-    cudaMallocCheck(&d_SearchArea, SizeSearchArea * sizeof(int), "Failed to allocate memory for d_SearchArea");
-    cudaError_t cudaStatus = cudaMalloc(&d_bestResult, sizeof(BestResult));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "CUDA malloc failed: %s\n", "Failed to allocate memory for d_bestresult");
-        fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus));
-        exit(EXIT_FAILURE);
-    }
-   
-
-    // Copy data from Host to Device
-    cudaMemcpyCheck(d_CurrentBlock, CurrentBlock, SizeCurrentBlock * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_CurrentBlock");
-    cudaMemcpyCheck(d_SearchArea, SearchArea, SizeSearchArea * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_SearchArea");
-    cudaMemcpyCheck(d_bestResult, bestResult, sizeof(BestResult), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_bestResult");
-    
-    // Determine kernel launch configuration
-    int threads_per_block = 32;
-    dim3 blockDist(threads_per_block, 1, 1);
-    dim3 gridDist(1, 1, 1);
-   
-    if ( iDist == 1 ){
-        
-            //SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, d_CurrentBlock, d_SearchArea, rowIdx, colIdx, centroX - iDist, centroY, p);
-            //cudaMemcpyCheck(bestResult, d_bestResult , sizeof(BestResult), cudaMemcpyDeviceToHost, "FAILED TO COPY DATA TO THE DEVICE");
-
-            cudaError_t cudaStatus2 = cudaMemcpy(&(localBest), d_bestResult, sizeof(BestResult), cudaMemcpyDeviceToHost);
-            if (cudaStatus2 != cudaSuccess) {
-                fprintf(stderr, "CUDA memcpy failed: %s\n", "FAILED TO COPY DATA TO THE DEVICE");
-                fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus2));
-                exit(EXIT_FAILURE);
-            }
-        
-            //SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, centroX-iDist, centroY      , p);
-        
-        
-        SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, centroX      , centroY-iDist, p);
-        SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, centroX      , centroY+iDist, p);
-        SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, centroX+iDist, centroY      , p);
-    }else{
-        int iTop        = centroY - iDist;
-        int iBottom     = centroY + iDist;
-        int iLeft       = centroX - iDist;
-        int iRight      = centroX + iDist;
-        if ( iDist <= 8 ){
-            int iTop_2     = centroY - (iDist>>1);
-            int iBottom_2  = centroY + (iDist>>1);
-            int iLeft_2    = centroX - (iDist>>1);
-            int iRight_2   = centroX + (iDist>>1);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, centroX,  iTop,    p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iLeft,    centroY, p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iRight,   centroY, p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, centroX,  iBottom, p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iLeft_2,  iTop_2,  p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iRight_2, iTop_2,  p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iLeft_2,  iBottom_2, p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iRight_2, iBottom_2, p);
-        }
-        else{
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, centroX, iTop,    p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iLeft,   centroY, p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iRight,  centroY, p);
-            SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, centroX, iBottom, p);
-            for(int index=1; index<4; index++){
-                int iPosYT     = iTop    + ((iDist>>2) * index);
-                int iPosYB     = iBottom - ((iDist>>2) * index);
-                int iPosXL     = centroX - ((iDist>>2) * index);
-                int iPosXR     = centroX + ((iDist>>2) * index);
-                SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iPosXL, iPosYT, p);
-                SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iPosXR, iPosYT, p);
-                SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iPosXL, iPosYB, p);
-                SAD( &(localBest), CurrentBlock, SearchArea, rowIdx, colIdx, iPosXR, iPosYB, p);
-            }
-        }
-    }
-    if (localBest.sad < bestResult->sad){
-        bestResult->sad = localBest.sad;
-        bestResult->bestDist = localBest.bestDist;
-        bestResult->vec_x = localBest.vec_x;
-        bestResult->vec_y = localBest.vec_y;
-    }
-
-    cudaFree(d_CurrentBlock);
-    cudaFree(d_SearchArea);
-    cudaFree(d_bestResult);
-
-}
-/************************************************************************************/
-void TZSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx, int colIdx, Parameters p){
-    int bestX, bestY;
-    bestResult->sad = BigSAD; 
-    bestResult->bestDist = 0;
-    bestResult->vec_x = 0;
-    bestResult->vec_y = 0;
-
-    // First prediction, at the center of the search area
-    SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, 0, 0, p);
-
-    // Initial Search: iDist in [1, 2, 4, 8, 16, 32, 64]
-    int iDist = 1;
-    while (iDist <= p.searchRange) {
-        xTZ8PointDiamondSearch(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, 0, 0, iDist, p);
-        iDist <<= 1;
-    }
-
-    // Raster Search
-    bestX = bestResult->vec_x;
-    bestY = bestResult->vec_y;
-    if ((bestX > p.iRaster) || (bestY > p.iRaster) || (-bestX > p.iRaster) || (-bestY > p.iRaster)){
-        int Top = -(int)(p.searchRange/2);
-        int Bottom = (int)(p.searchRange/2);
-        int Left = -(int)(p.searchRange/2);
-        int Right = (int)(p.searchRange/2);
-        for(int iStartY=Top; iStartY<Bottom; iStartY+=p.iRaster)
-            for(int iStartX=Left; iStartX<Right; iStartX+=p.iRaster)
-                SAD(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, iStartX, iStartY, p);
-    }
-
-    // Refinement
-    bestX = bestResult->vec_x;
-    bestY = bestResult->vec_y;
-    int RefinementCount=0;
-    if ((bestX != 0) || (bestY != 0))
-        while ((bestResult->vec_x == bestX) && (bestResult->vec_y == bestY)){
-            iDist = 1;
-            while (iDist <= p.searchRange) {
-                xTZ8PointDiamondSearch(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, bestX, bestY, iDist, p);
-            
-                if (((4 <= iDist) && (bestResult->bestDist == 0)) ||
-                    ((8 <= iDist) && (bestResult->bestDist <= 1)) ||
-                    ((16 <= iDist) && (bestResult->bestDist <= 2)) ||
-                    ((32 <= iDist) && (bestResult->bestDist <= 4)))
-                        break;
-
-                iDist <<= 1;
-            }
-            if (((bestResult->vec_x == bestX) && (bestResult->vec_y == bestY)) || (RefinementCount == 7))
-                break;
-            else{
-                bestX = bestResult->vec_x;
-                bestY = bestResult->vec_y;
-                RefinementCount += 1;
-            }
-        }
-}
-/************************************************************************************/
-void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx, int colIdx, Parameters p){
+void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea,  int *curr_frame, int *ref_frame,int rowIdx, int colIdx, Parameters p){
     bestResult->sad = BigSAD;
     bestResult->bestDist = 0;
     bestResult->vec_x = 0;
     bestResult->vec_y = 0;
-
-    int SizeCurrentBlock = p.blockSize * p.blockSize;
-    int SizeSearchArea = (2 * p.searchRange + p.blockSize) * (2 * p.searchRange + p.blockSize);
-
-    int *d_CurrentBlock, *d_SearchArea;
+    
     BestResult* d_bestResult;
-
-    cudaMallocCheck(&d_CurrentBlock, SizeCurrentBlock * sizeof(int), "Failed to allocate memory for d_CurrentBlock");
-    cudaMallocCheck(&d_SearchArea, SizeSearchArea * sizeof(int), "Failed to allocate memory for d_SearchArea");
+    BestResult* finalResult;
     cudaError_t cudaStatus = cudaMalloc(&d_bestResult, sizeof(BestResult));
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "CUDA malloc failed: %s\n", "Failed to allocate memory for d_bestresult");
@@ -415,83 +215,123 @@ void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int 
     }
     
 
-    // Copy data from Host to Device
-    cudaMemcpyCheck(d_CurrentBlock, CurrentBlock, SizeCurrentBlock * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_CurrentBlock");
-    cudaMemcpyCheck(d_SearchArea, SearchArea, SizeSearchArea * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_SearchArea");
     cudaMemcpyCheck(d_bestResult, bestResult, sizeof(BestResult), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_bestResult");
-    
-    // Determine kernel launch configuration
+  
     int threads_per_block = 32;
     dim3 blockDist(threads_per_block, 1, 1);
     dim3 gridDist(1, 1, 1);
+    if (! (0<=rowIdx-p.searchRange && 0<=colIdx-p.searchRange)){
+        for(int iStartX=-p.searchRange; iStartX<p.searchRange; iStartX++){
 
-    int posX ; 
-    int posY ;
-    int offset=0;
-    
-    
-    for(int iStartX=-p.searchRange; iStartX<p.searchRange; iStartX++){
+            int posX = p.searchRange+iStartX;
+            if (0 <= (rowIdx+posX) && (rowIdx+posX) < p.height){
 
-        posX = p.searchRange+iStartX;
-        if (0 <= (rowIdx+posX) && (rowIdx+posX) < p.height){
+                for(int iStartY=-p.searchRange; iStartY<p.searchRange; iStartY++){
 
-            for(int iStartY=-p.searchRange; iStartY<p.searchRange; iStartY++){
+                    int posY = p.searchRange+iStartY;
+                    if (0 <= (colIdx+posY) && (colIdx+posY) < p.width){
+                        // Launch the kernel with the required portion of the searchArea matrix
+                        
+                        //SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, CurrentBlock, SearchArea,rowIdx, colIdx,iStartX, iStartY, p);
+                        /*
+                        cudaStatus = cudaGetLastError();
+                        if (cudaStatus != cudaSuccess) {
+                            fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
+                            fprintf(stderr,"%d iStartX, %d iStartY, %d rrow, %d col: ",iStartX,iStartY,rowIdx,colIdx);
+                            exit(EXIT_FAILURE);
+                        }
 
-                posY = p.searchRange+iStartY;
-                if (0 <= (colIdx+posY) && (colIdx+posY) < p.width){
-                    // Launch the kernel with the required portion of the searchArea matrix
-                    SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, d_CurrentBlock, d_SearchArea,iStartX, iStartY, p);
+                        // Synchronize the device to catch any errors from the kernel
+                        cudaStatus = cudaDeviceSynchronize();
+                        if (cudaStatus != cudaSuccess) {
+                            fprintf(stderr, "CUDA error during synchronization: %s\n", cudaGetErrorString(cudaStatus));
+                            printf("%d iStartX, %d iStartY, %d rrow, %d col: ",iStartX,iStartY,rowIdx,colIdx);
+                            exit(EXIT_FAILURE);
+                        }
+                        //SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, d_CurrentBlock, d_SearchArea,iStartX, iStartY, p);
+                        */
+                        SAD(bestResult, curr_frame, ref_frame, rowIdx, colIdx, iStartX, iStartY, p);
+                    
+                    }    
+                }
 
-
-                    //SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, d_CurrentBlock, d_SearchArea,iStartX, iStartY, p);
-                }    
             }
+        }
+    }else{
+        for(int iStartX=-p.searchRange; iStartX<p.searchRange; iStartX++){
 
+            int posX = p.searchRange+iStartX;
+            if (0 <= (rowIdx+posX) && (rowIdx+posX) < p.height){
+
+                for(int iStartY=-p.searchRange; iStartY<p.searchRange; iStartY++){
+
+                    int posY = p.searchRange+iStartY;
+                    if (0 <= (colIdx+posY) && (colIdx+posY) < p.width){
+                        // Launch the kernel with the required portion of the searchArea matrix
+                        
+                        SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, CurrentBlock, SearchArea,rowIdx, colIdx,iStartX, iStartY, p);
+                        
+                        cudaStatus = cudaGetLastError();
+                        if (cudaStatus != cudaSuccess) {
+                            fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
+                            fprintf(stderr,"%d iStartX, %d iStartY, %d rrow, %d col: ",iStartX,iStartY,rowIdx,colIdx);
+                            exit(EXIT_FAILURE);
+                        }
+
+                        // Synchronize the device to catch any errors from the kernel
+                        cudaStatus = cudaDeviceSynchronize();
+                        if (cudaStatus != cudaSuccess) {
+                            fprintf(stderr, "CUDA error during synchronization: %s\n", cudaGetErrorString(cudaStatus));
+                            printf("%d iStartX, %d iStartY, %d rrow, %d col: ",iStartX,iStartY,rowIdx,colIdx);
+                            exit(EXIT_FAILURE);
+                        }
+                        //SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, d_CurrentBlock, d_SearchArea,iStartX, iStartY, p);
+                        
+                        //SAD(bestResult, curr_frame, ref_frame, rowIdx, colIdx, iStartX, iStartY, p);
+                    
+                    }    
+                }
+
+            }
+        }
+        cudaError_t cudaStatus2 = cudaMemcpy(bestResult, d_bestResult, sizeof(BestResult), cudaMemcpyDeviceToHost);
+        if (cudaStatus2 != cudaSuccess) {
+            fprintf(stderr, "CUDA memcpy failed: %s\n", "FAILED TO COPY DATA TO THE DEVICE");
+            fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus2));
+            exit(EXIT_FAILURE);
         }
     }
-    cudaError_t cudaStatus2 = cudaMemcpy(bestResult, d_bestResult, sizeof(BestResult), cudaMemcpyDeviceToHost);
-    if (cudaStatus2 != cudaSuccess) {
-        fprintf(stderr, "CUDA memcpy failed: %s\n", "FAILED TO COPY DATA TO THE DEVICE");
-        fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus2));
-        exit(EXIT_FAILURE);
-    }
-    cudaFree(d_CurrentBlock);
-    cudaFree(d_SearchArea);
+    
+    
+
+    
+    
     cudaFree(d_bestResult);
+    
 }
 /************************************************************************************/
-void MotionEstimation(BestResult** motionVectors, int **curr_frame, int **ref_frame, Parameters p){
+void MotionEstimation(BestResult** motionVectors, int *d_curr_frame, int *d_ref_frame, int *curr_frame, int *ref_frame,  Parameters p){
     BestResult* bestResult;
 
-    int* CurrentBlock  = (int*)malloc(p.blockSize*p.blockSize * sizeof(int));
-    int* SearchArea = (int*)malloc((2*p.searchRange+p.blockSize) * (2*p.searchRange+p.blockSize) * sizeof(int));
+    int* CurrentBlock; // = (int*)malloc(p.blockSize*p.blockSize * sizeof(int));
+    int* SearchArea; //= (int*)malloc((2*p.searchRange+p.blockSize) * (2*p.searchRange+p.blockSize) * sizeof(int));
  
 
 	for(int rowIdx=0; rowIdx<(p.height-p.blockSize+1); rowIdx+=p.blockSize)
 		for(int colIdx=0; colIdx<(p.width-p.blockSize+1); colIdx+=p.blockSize){
-			// Gets current block and search area data
-	        getBlock(CurrentBlock, curr_frame, rowIdx, colIdx, p);
-	        getSearchArea(SearchArea, ref_frame, rowIdx, colIdx, p);
-            bestResult = &(motionVectors[rowIdx / p.blockSize][colIdx / p.blockSize]);
+			// Gets current block and search area dat
             // Runs the motion estimation algorithm on this block
+            bestResult = &(motionVectors[rowIdx / p.blockSize][colIdx / p.blockSize]);
             switch (p.algorithm)
             {
             case FSBM:
-                fullSearch(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, p);
-                break;
-            case TZS:
-                TZSearch(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, p);
-                break;
-            case SS:
-                StepSearch(bestResult, CurrentBlock, SearchArea, rowIdx, colIdx, p);
+                fullSearch(bestResult, d_curr_frame, d_ref_frame, curr_frame, ref_frame, rowIdx, colIdx, p);
                 break;
             default:
                 break;
             }
         }
 
-    free(CurrentBlock);
-    free(SearchArea);
 }
 /************************************************************************************/
 /************************************************************************************/
@@ -545,13 +385,11 @@ int main(int argc, char** argv) {
     }
 
     // Frame memory allocation
-    int** curr_frame = (int**)malloc(p.height * sizeof(int*));
-    int** ref_frame  = (int**)malloc(p.height * sizeof(int*));
+    int* curr_frame = (int*)malloc(p.height*p.width * sizeof(int));
+    int* ref_frame  = (int*)malloc(p.height*p.width * sizeof(int));
     int** res_frame  = (int**)malloc(p.height * sizeof(int*));
     int** rec_frame  = (int**)malloc(p.height * sizeof(int*));
     for (int i = 0; i < p.height; i++){
-        curr_frame[i] = (int*)malloc(p.width * sizeof(int));
-        ref_frame[i]  = (int*)malloc(p.width * sizeof(int));
         res_frame[i]  = (int*)malloc(p.width * sizeof(int));
         rec_frame[i]  = (int*)malloc(p.width * sizeof(int));
     }
@@ -565,16 +403,26 @@ int main(int argc, char** argv) {
     clock_gettime(CLOCK_REALTIME, &t0);
     // Read first frame
     getLumaFrame(curr_frame, video_in, p);      // curr_frame contains the current luminance frame
+
+    int * d_curr_frame, *d_ref_frame;
+    cudaMallocCheck(&d_curr_frame, p.width*p.height * sizeof(int), "Failed to allocate memory for d_CurrentBlock");
+    cudaMallocCheck(&d_ref_frame, p.width*p.height * sizeof(int), "Failed to allocate memory for d_SearchArea");
+
+   
     //
     for (int frameNum = 0; frameNum < p.frames; frameNum++) {
-        int** temp;
+        int* temp;
+        
         temp = ref_frame;
         ref_frame = curr_frame;                // ref_frame contains the previous (reference) luminance frame
         curr_frame = temp;
+
         getLumaFrame(curr_frame, video_in, p); // curr_frame contains the current luminance frame
 
         // Process the current frame, one block at a time, to obatin an array with the motion vectors and SAD values
-        MotionEstimation(motionVectors, curr_frame, ref_frame, p);
+        cudaMemcpyCheck(d_ref_frame, ref_frame, p.width*p.height * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_SearchArea");
+        cudaMemcpyCheck(d_curr_frame, curr_frame, p.width*p.height * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_CurrentBlock");
+        MotionEstimation(motionVectors, d_curr_frame, d_ref_frame, curr_frame, ref_frame, p);
 
         // Recustruct the predicted frame using the obtained motion vectors
         for (int rowIdx = 0; rowIdx < p.height - p.blockSize + 1; rowIdx += p.blockSize) {
@@ -594,7 +442,7 @@ int main(int argc, char** argv) {
         for(int r = 0; r < p.height; r++)
             for(int c = 0; c < p.width; c++)
                 if(r > (p.height - p.blockSize + 1) || c > (p.width - p.blockSize + 1))
-                    rec_frame[r][c] = ref_frame[r][c];
+                    rec_frame[r][c] = ref_frame[r*p.width+c];
 
 
         // Compute residue block
@@ -604,14 +452,14 @@ int main(int argc, char** argv) {
         setLumaFrame(rec_frame, reconst_out, p);
         setLumaFrame(res_frame, residue_out, p);
     }
+    
     clock_gettime(CLOCK_REALTIME, &t1);
+    
 	printf ("%lf seconds elapsed \n", (t1.tv_sec-t0.tv_sec) + (t1.tv_nsec-t0.tv_nsec)*1e-9);
     printf ("Accumulated Residue = %llu \n", accumulatedResidue);
 
     // Frame memory free
     for (int i = 0; i < p.height; i++){
-        free(curr_frame[i]);
-        free(ref_frame[i]);
         free(res_frame[i]);
         free(rec_frame[i]);
     }
