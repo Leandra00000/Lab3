@@ -106,63 +106,59 @@ void getSearchArea(int* searchArea, int* frame, int i, int j, Parameters p){
 void SAD(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx, int colIdx, int k, int m, Parameters p){
     // k, m: displacement (motion vector) under analysis (in the search area)
 
-    int sad = 0;
-    int posX = p.searchRange+k; // normalized coordinates within search area, between 0 and 2*searchRange
-    int posY = p.searchRange+m; // normalized coordinates within search area, between 0 and 2*searchRange
-    // checks if search area range is valid (inside frame borders) and if current block range is valid (inside frame borders)
-    if ( (-p.searchRange <= k) && (k <= p.searchRange) && \
-         (-p.searchRange <= m) && (m <= p.searchRange) && \
-         (0 <= (rowIdx+posX)) && ((rowIdx+posX) < p.height) && \
-         (0 <= (colIdx+posY)) && ((colIdx+posY) < p.width) ){
-        // computes SAD disparity, by comparing the current block with the reference block at (k,m)
-        
-        for(int i=0; i<p.blockSize; i++){
-            for(int j=0; j<p.blockSize; j++){
-                if ( ((0<=(rowIdx+k+i)) && ((0<=(colIdx+m+j) ))))
-                    sad += abs(CurrentBlock[(i+rowIdx)*p.width+(j+colIdx)] - SearchArea[(k+i+rowIdx)*p.width+j+m+colIdx]);
-                else
-                    sad+= abs(CurrentBlock[(i+rowIdx)*p.width+(j+colIdx)]);
-                
-                
-            }
+    int sad = 0; 
+    for(int i=0; i<p.blockSize; i++){
+        for(int j=0; j<p.blockSize; j++){
+            if ( ((0<=(rowIdx+k+i)) && ((0<=(colIdx+m+j) ))))
+                sad += abs(CurrentBlock[(i+rowIdx)*p.width+(j+colIdx)] - SearchArea[(k+i+rowIdx)*p.width+j+m+colIdx]);
+            else
+                sad+= abs(CurrentBlock[(i+rowIdx)*p.width+(j+colIdx)]);
+            
+            
         }
-        // compares the obtained sad with the best so far for that block
-        if (sad < bestResult->sad){
-            bestResult->sad = sad;
-            bestResult->vec_x = k;
-            bestResult->vec_y = m;
-        }
+    }
+    // compares the obtained sad with the best so far for that block
+    if (sad < bestResult->sad){
+        bestResult->sad = sad;
+        bestResult->vec_x = k;
+        bestResult->vec_y = m;
     }
 }
 
 /************************************************************************************/
 __global__ void SAD_kernel(BestResult* bestResult, int* currentBlock, int* searchArea,int rowIdx, int colIdx, Parameters p, BestResult * d_bestresult_V) {
-    __shared__ int returnBlock[32];
-    unsigned int i;
+    __shared__ int returnBlock[32*32];
+    unsigned int i,j;
     unsigned int column = threadIdx.x;
-    for(int iStartX=-p.searchRange; iStartX<p.searchRange; iStartX++){
-            returnBlock[column] = 0;
-            for(i=0; i<p.blockSize;i++){
-                returnBlock[column] += abs(currentBlock[(i+rowIdx)*p.width+(column+colIdx)] - searchArea[(iStartX+i+rowIdx)*p.width+column+blockIdx.x-p.searchRange+colIdx]);
-            }
-            __syncthreads();
-            unsigned int tid = column;
-            for (i=blockDim.x >> 1; i > 0; i = i >> 1) {
-                if(tid < i){
-                    returnBlock[tid] += returnBlock[tid + i];
-                }
-                __syncthreads();
-            }
-            __syncthreads();    
+    unsigned int iStartY = threadIdx.y;
+    int numCols = blockDim.x;  // Number of columns in the grid (x-dimension)
+    int TrowIdx = blockIdx.y * blockDim.y + threadIdx.y; // Row index of the thread
+    int TcolIdx = blockIdx.x * blockDim.x + threadIdx.x; // Column index of the thread
+    int finish=blockIdx.x * blockDim.y + threadIdx.y;
+    int threadId_1D_within_block = threadIdx.y * blockDim.x + threadIdx.x;
 
-            if(tid == 0){
-                if(d_bestresult_V[blockIdx.x].sad >returnBlock[0]){
-                    d_bestresult_V[blockIdx.x].sad = returnBlock[0];
-                    d_bestresult_V[blockIdx.x].vec_x = iStartX;
-                    d_bestresult_V[blockIdx.x].vec_y = blockIdx.x-p.searchRange;
-                }
+    for(int iStartX=-p.searchRange; iStartX<p.searchRange; iStartX++){
+        returnBlock[threadIdx.y*32 + column] = 0;
+        for(i=0; i<p.blockSize;i++){ 
+            returnBlock[threadIdx.y*32 + column] += abs(currentBlock[(i+rowIdx)*p.width+(column+colIdx)] - searchArea[(iStartX+i+rowIdx)*p.width+column+finish-p.searchRange+colIdx]);
+        }
+        __syncthreads();
+        unsigned int tid = column;
+        for (i=blockDim.x >> 1; i > 0; i = i >> 1) {
+            if(tid < i){
+                returnBlock[threadIdx.y*32+tid] += returnBlock[threadIdx.y*32+tid + i];
             }
             __syncthreads();
+        }  
+        __syncthreads();
+        if(column == 0){
+            if(d_bestresult_V[finish].sad >returnBlock[threadIdx.y*32]){
+                d_bestresult_V[finish].sad = returnBlock[threadIdx.y*32];
+                d_bestresult_V[finish].vec_x = iStartX;
+                d_bestresult_V[finish].vec_y = finish-p.searchRange;
+            }
+        }
+        __syncthreads();
         
     }
 }
@@ -232,8 +228,8 @@ void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea,  int
         cudaMemcpyCheck(d_bestResult, bestResult, sizeof(BestResult), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_bestResult");
     
         int threads_per_block = 32;
-        dim3 blockDist(threads_per_block, 1, 1);
-        dim3 gridDist(128, 1, 1);
+        dim3 blockDist(threads_per_block, threads_per_block, 1);
+        dim3 gridDist(4, 1, 1);
 
         BestResult *d_bestresult_V;
         BestResult* Best_V = (BestResult*)malloc(128 * sizeof(BestResult));
