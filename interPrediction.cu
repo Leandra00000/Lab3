@@ -128,66 +128,68 @@ void SAD(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx,
 /************************************************************************************/
 __global__ void SAD_kernel(BestResult* bestResult, int* currentBlock, int* searchArea,int rowIdx, int colIdx, Parameters p, BestResult * d_bestresult_V) {
     __shared__ int returnBlock[32*32];
+    __shared__ BestResult S_bestResult[32];
     unsigned int i,j;
     unsigned int column = threadIdx.x;
     unsigned int iStartY = threadIdx.y;
-    int numCols = blockDim.x;  // Number of columns in the grid (x-dimension)
-    int TrowIdx = blockIdx.y * blockDim.y + threadIdx.y; // Row index of the thread
-    int TcolIdx = blockIdx.x * blockDim.x + threadIdx.x; // Column index of the thread
+    unsigned int iStartX = blockIdx.y-p.searchRange;
     int finish=blockIdx.x * blockDim.y + threadIdx.y;
     int threadId_1D_within_block = threadIdx.y * blockDim.x + threadIdx.x;
 
-    for(int iStartX=-p.searchRange; iStartX<p.searchRange; iStartX++){
-        returnBlock[threadIdx.y*32 + column] = 0;
-        for(i=0; i<p.blockSize;i++){ 
-            returnBlock[threadIdx.y*32 + column] += abs(currentBlock[(i+rowIdx)*p.width+(column+colIdx)] - searchArea[(iStartX+i+rowIdx)*p.width+column+finish-p.searchRange+colIdx]);
-        }
-        __syncthreads();
-        unsigned int tid = column;
-        for (i=blockDim.x >> 1; i > 0; i = i >> 1) {
-            if(tid < i){
-                returnBlock[threadIdx.y*32+tid] += returnBlock[threadIdx.y*32+tid + i];
-            }
-            __syncthreads();
-        }  
-        __syncthreads();
-        if(column == 0){
-            if(d_bestresult_V[finish].sad >returnBlock[threadIdx.y*32]){
-                d_bestresult_V[finish].sad = returnBlock[threadIdx.y*32];
-                d_bestresult_V[finish].vec_x = iStartX;
-                d_bestresult_V[finish].vec_y = finish-p.searchRange;
-            }
-        }
-        __syncthreads();
-        
+    
+    returnBlock[threadIdx.y*32 + column] = 0;
+    for(i=0; i<p.blockSize;i++){ 
+        returnBlock[threadIdx.y*32 + column] += abs(currentBlock[(i+rowIdx)*p.width+(column+colIdx)] - searchArea[(iStartX+i+rowIdx)*p.width+column+finish-p.searchRange+colIdx]);
     }
+    
+    unsigned int tid = column;
+    for (i=blockDim.x >> 1; i > 0; i = i >> 1) {
+        if(tid < i){
+            returnBlock[threadIdx.y*32+tid] += returnBlock[threadIdx.y*32+tid + i];
+        }
+        __syncthreads();
+    }  
+    
+    __syncthreads();
+    if(column == 0){
+        S_bestResult[threadIdx.y].sad = returnBlock[threadIdx.y*32];
+        S_bestResult[threadIdx.y].vec_x = iStartX;
+        S_bestResult[threadIdx.y].vec_y = finish-p.searchRange;
+    }
+    __syncthreads();
+    
+    if(column == 0 && iStartY==0){
+        BestResult min;
+        min.sad=S_bestResult[0].sad;
+        min.vec_x=S_bestResult[0].vec_x;
+        min.vec_y=S_bestResult[0].vec_y;
+        for(i=0;i<32;i++){
+            if(S_bestResult[i].sad<min.sad){
+                min.sad=S_bestResult[i].sad;
+                min.vec_x=S_bestResult[i].vec_x;
+                min.vec_y=S_bestResult[i].vec_y;
+            }
+        }
+        d_bestresult_V[blockIdx.y*4+blockIdx.x].sad = min.sad;
+        d_bestresult_V[blockIdx.y*4+blockIdx.x].vec_x = min.vec_x;
+        d_bestresult_V[blockIdx.y*4+blockIdx.x].vec_y = min.vec_y;
+    }
+        
+    
 }
 
 
 /**********************************************************************************/
-BestResult* allocateBestResultOnDevice() {
-    BestResult* device_bestResult;
-    cudaMalloc((void**)&device_bestResult, sizeof(BestResult));
-    return device_bestResult;
-}
-/**/
+
 
 void cudaMallocCheck(int** devPtr, size_t size, const char* errorMsg) {
-    cudaError_t cudaStatus = cudaMalloc(devPtr, size);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "CUDA malloc failed: %s\n", errorMsg);
-        fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus));
-        exit(EXIT_FAILURE);
-    }
+    cudaMalloc(devPtr, size);
+    
 }
 
 void cudaMemcpyCheck(void* dst, const void* src, size_t count, cudaMemcpyKind kind, const char* errorMsg) {
-    cudaError_t cudaStatus = cudaMemcpy(dst, src, count, kind);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "CUDA memcpy failed: %s\n", errorMsg);
-        fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus));
-        exit(EXIT_FAILURE);
-    }
+    cudaMemcpy(dst, src, count, kind);
+
 }
 
 /************************************************************************************/
@@ -217,64 +219,34 @@ void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea,  int
             }
         }
     }else{
-        cudaError_t cudaStatus = cudaMalloc(&d_bestResult, sizeof(BestResult));
-        if (cudaStatus != cudaSuccess) {
-            fprintf(stderr, "CUDA malloc failed: %s\n", "Failed to allocate memory for d_bestresult");
-            fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus));
-            exit(EXIT_FAILURE);
-        }
+        struct timespec t0,t1;
+        cudaMalloc(&d_bestResult, sizeof(BestResult));
+        
         
 
         cudaMemcpyCheck(d_bestResult, bestResult, sizeof(BestResult), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_bestResult");
     
         int threads_per_block = 32;
         dim3 blockDist(threads_per_block, threads_per_block, 1);
-        dim3 gridDist(4, 1, 1);
+        dim3 gridDist(4, 128, 1);
 
         BestResult *d_bestresult_V;
-        BestResult* Best_V = (BestResult*)malloc(128 * sizeof(BestResult));
-        for(int i=0;i<128;i++){
+        BestResult* Best_V = (BestResult*)malloc(128*4 * sizeof(BestResult));
+        for(int i=0;i<128*4;i++){
             Best_V[i].sad=BigSAD;
         }
 
-        cudaStatus=cudaMalloc(&d_bestresult_V, 128* sizeof(BestResult));
-        if (cudaStatus != cudaSuccess) {
-            fprintf(stderr, "CUDA malloc failed: %s\n", "Failed to allocate memory for d_bestresult");
-            fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus));
-            exit(EXIT_FAILURE);
-        }
-        cudaStatus=cudaMemcpy(d_bestresult_V, Best_V, 128 * sizeof(BestResult), cudaMemcpyHostToDevice);
-        if (cudaStatus != cudaSuccess) {
-            fprintf(stderr, "CUDA malloc failed: %s\n", "Failed to allocate memory for d_bestresult");
-            fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus));
-            exit(EXIT_FAILURE);
-        }
+        cudaMalloc(&d_bestresult_V, 128*4* sizeof(BestResult));
+    
+        cudaMemcpy(d_bestresult_V, Best_V, 128 *4* sizeof(BestResult), cudaMemcpyHostToDevice);
+       
      
-                        SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, CurrentBlock, SearchArea,rowIdx, colIdx, p, d_bestresult_V);
-                        
-                        cudaStatus = cudaGetLastError();
-                        if (cudaStatus != cudaSuccess) {
-                            fprintf(stderr, "Kernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-                            fprintf(stderr,"%d rrow, %d col: ",rowIdx,colIdx);
-                            exit(EXIT_FAILURE);
-                        }
-
-                        // Synchronize the device to catch any errors from the kernel
-                        cudaStatus = cudaDeviceSynchronize();
-                        if (cudaStatus != cudaSuccess) {
-                            fprintf(stderr, "CUDA error during synchronization: %s\n", cudaGetErrorString(cudaStatus));
-                            printf("%d rrow, %d col: ",rowIdx,colIdx);
-                            exit(EXIT_FAILURE);
-                        }
+        SAD_kernel<<<gridDist, blockDist>>>(d_bestResult, CurrentBlock, SearchArea,rowIdx, colIdx, p, d_bestresult_V);
         
-        cudaError_t cudaStatus2 = cudaMemcpy(Best_V, d_bestresult_V, 128*sizeof(BestResult), cudaMemcpyDeviceToHost);
-        if (cudaStatus2 != cudaSuccess) {
-            fprintf(stderr, "CUDA memcpy failed: %s\n", "FAILED TO COPY DATA TO THE DEVICE");
-            fprintf(stderr, "CUDA error message: %s\n", cudaGetErrorString(cudaStatus2));
-            exit(EXIT_FAILURE);
-        }
+        cudaMemcpy(Best_V, d_bestresult_V, 128*4*sizeof(BestResult), cudaMemcpyDeviceToHost);
+       
 
-        for(int i=0;i<128;i++){
+        for(int i=0;i<128*4;i++){
             if(Best_V[i].sad<bestResult->sad){
                 bestResult->sad=Best_V[i].sad;
                 bestResult->vec_x=Best_V[i].vec_x;
@@ -449,7 +421,3 @@ int main(int argc, char** argv) {
 
     return 0;
 }
-
-
-
-
