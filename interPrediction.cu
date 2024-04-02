@@ -40,12 +40,13 @@ typedef struct {
 
 
 /************************************************************************************/
-void getLumaFrame(int* frame_mem, FILE* yuv_file, Parameters p){
+void getLumaFrame(int** frame_mem, int *frame_v, FILE* yuv_file, Parameters p){
     int count;
     for(int r=0; r<p.height;r++)
-        for(int c=0; c<p.width;c++)
-           count=fread(&(frame_mem[r*p.width+c]),1,1,yuv_file);
-
+        for(int c=0; c<p.width;c++){
+            count=fread(&(frame_mem[r][c]),1,1,yuv_file);
+            frame_v[r*p.width+c]=frame_mem[r][c];
+        }
     // Skips the color Cb and Cr components in the YUV 4:2:0 file
     fseek(yuv_file,p.width*p.height/2,SEEK_CUR);
 }
@@ -65,19 +66,19 @@ void setLumaFrame(int** frame_mem, FILE* yuv_file, Parameters p){
         }
 }
 /************************************************************************************/
-void reconstruct(int** rec_frame, int* ref_frame, int i, int j, Parameters p, BestResult* MV){
+void reconstruct(int** rec_frame, int** ref_frame, int i, int j, Parameters p, BestResult* MV){
     for(int a=i; a<i+p.blockSize; a++)
         for(int b=j; b<j+p.blockSize; b++)
             if( (0<=a+MV->vec_x) && (a+MV->vec_x<p.height) && (0<=b+MV->vec_y) && (b+MV->vec_y<p.width) )
-                rec_frame[a][b] = ref_frame[(a+MV->vec_x)*p.width+b+MV->vec_y];
+                rec_frame[a][b] = ref_frame[a+MV->vec_x][b+MV->vec_y];
 }
 /************************************************************************************/
-unsigned long long computeResidue(int** res_frame, int* curr_frame, int** rec_frame, Parameters p){
+unsigned long long computeResidue(int** res_frame, int** curr_frame, int** rec_frame, Parameters p){
     unsigned long long accumulatedDifference = 0;
     int difference;
     for(int a=0; a<p.height; a++)
         for(int b=0; b<p.width; b++){
-            difference = curr_frame[a*p.width+b] - rec_frame[a][b];
+            difference = curr_frame[a][b] - rec_frame[a][b];
             if (difference < 0) 
                 difference = - difference;
             if (255 < difference)
@@ -88,31 +89,31 @@ unsigned long long computeResidue(int** res_frame, int* curr_frame, int** rec_fr
     return(accumulatedDifference);
 }
 /************************************************************************************/
-void getBlock(int* block, int* frame, int i, int j, Parameters p){
+void getBlock(int** block, int** frame, int i, int j, Parameters p){
     for(int m=0; m<p.blockSize; m++)
         for(int n=0; n<p.blockSize; n++)
-            block[m*p.blockSize+n] = frame[(i+m)*p.width+j+n];
+            block[m][n] = frame[i+m][j+n];
 }    
 /************************************************************************************/
-void getSearchArea(int* searchArea, int* frame, int i, int j, Parameters p){
+void getSearchArea(int** searchArea, int** frame, int i, int j, Parameters p){
     for(int m=-p.searchRange; m<p.searchRange+p.blockSize; m++)
         for(int n=-p.searchRange; n<p.searchRange+p.blockSize; n++)
             if ( ((0<=(i+m)) && ((i+m)<p.height)) && ((0<=(j+n)) && ((j+n)<p.width)) )
-                searchArea[(p.searchRange + m) * (2 * p.searchRange + p.blockSize) + (p.searchRange + n)] = frame[(i+m)*p.width+j+n];
+                searchArea[p.searchRange+m][p.searchRange+n] = frame[i+m][j+n];
             else
-                searchArea[(p.searchRange + m) * (2 * p.searchRange + p.blockSize) + (p.searchRange + n)] = 0; 
+                searchArea[p.searchRange+m][p.searchRange+n] = 0; 
 }
 /************************************************************************************/
-void SAD(BestResult* bestResult, int* CurrentBlock, int* SearchArea, int rowIdx, int colIdx, int k, int m, Parameters p){
+void SAD(BestResult* bestResult, int** CurrentBlock, int** SearchArea, int rowIdx, int colIdx, int k, int m, Parameters p){
     // k, m: displacement (motion vector) under analysis (in the search area)
 
     int sad = 0; 
     for(int i=0; i<p.blockSize; i++){
         for(int j=0; j<p.blockSize; j++){
             if ( ((0<=(rowIdx+k+i)) && ((0<=(colIdx+m+j) ))))
-                sad += abs(CurrentBlock[(i+rowIdx)*p.width+(j+colIdx)] - SearchArea[(k+i+rowIdx)*p.width+j+m+colIdx]);
+                sad += abs(CurrentBlock[(i+rowIdx)][(j+colIdx)] - SearchArea[(k+i+rowIdx)][j+m+colIdx]);
             else
-                sad+= abs(CurrentBlock[(i+rowIdx)*p.width+(j+colIdx)]);
+                sad+= abs(CurrentBlock[(i+rowIdx)][(j+colIdx)]);
             
             
         }
@@ -193,7 +194,7 @@ void cudaMemcpyCheck(void* dst, const void* src, size_t count, cudaMemcpyKind ki
 }
 
 /************************************************************************************/
-void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea,  int *curr_frame, int *ref_frame,int rowIdx, int colIdx, Parameters p){
+void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea,  int **curr_frame, int **ref_frame,int rowIdx, int colIdx, Parameters p){
     bestResult->sad = BigSAD;
     bestResult->bestDist = 0;
     bestResult->vec_x = 0;
@@ -261,7 +262,7 @@ void fullSearch(BestResult* bestResult, int* CurrentBlock, int* SearchArea,  int
     
 }
 /************************************************************************************/
-void MotionEstimation(BestResult** motionVectors, int *d_curr_frame, int *d_ref_frame, int *curr_frame, int *ref_frame,  Parameters p){
+void MotionEstimation(BestResult** motionVectors, int *d_curr_frame, int *d_ref_frame, int **curr_frame, int **ref_frame,  Parameters p){
     BestResult* bestResult;
 
     int* CurrentBlock; // = (int*)malloc(p.blockSize*p.blockSize * sizeof(int));
@@ -336,13 +337,17 @@ int main(int argc, char** argv) {
     }
 
     // Frame memory allocation
-    int* curr_frame = (int*)malloc(p.height*p.width * sizeof(int));
-    int* ref_frame  = (int*)malloc(p.height*p.width * sizeof(int));
+    int* curr_frame_v = (int*)malloc(p.height*p.width * sizeof(int));
+    int* ref_frame_v  = (int*)malloc(p.height*p.width * sizeof(int));
+    int** curr_frame = (int**)malloc(p.height * sizeof(int*));
+    int** ref_frame  = (int**)malloc(p.height* sizeof(int*));
     int** res_frame  = (int**)malloc(p.height * sizeof(int*));
     int** rec_frame  = (int**)malloc(p.height * sizeof(int*));
     for (int i = 0; i < p.height; i++){
         res_frame[i]  = (int*)malloc(p.width * sizeof(int));
         rec_frame[i]  = (int*)malloc(p.width * sizeof(int));
+        ref_frame[i]  = (int*)malloc(p.width * sizeof(int));
+        curr_frame[i]  = (int*)malloc(p.width * sizeof(int));
     }
 
     // Memory allocation of result table
@@ -353,7 +358,7 @@ int main(int argc, char** argv) {
 
     clock_gettime(CLOCK_REALTIME, &t0);
     // Read first frame
-    getLumaFrame(curr_frame, video_in, p);      // curr_frame contains the current luminance frame
+    getLumaFrame(curr_frame, curr_frame_v, video_in, p);      // curr_frame contains the current luminance frame
 
     int * d_curr_frame, *d_ref_frame;
     cudaMallocCheck(&d_curr_frame, p.width*p.height * sizeof(int), "Failed to allocate memory for d_CurrentBlock");
@@ -362,17 +367,22 @@ int main(int argc, char** argv) {
    
     //
     for (int frameNum = 0; frameNum < p.frames; frameNum++) {
-        int* temp;
+        int** temp;
+        int* temp2;
         
         temp = ref_frame;
         ref_frame = curr_frame;                // ref_frame contains the previous (reference) luminance frame
         curr_frame = temp;
 
-        getLumaFrame(curr_frame, video_in, p); // curr_frame contains the current luminance frame
+        temp2 = ref_frame_v;
+        ref_frame_v = curr_frame_v;                // ref_frame contains the previous (reference) luminance frame
+        curr_frame_v = temp2;
+
+        getLumaFrame(curr_frame,curr_frame_v, video_in, p); // curr_frame contains the current luminance frame
 
         // Process the current frame, one block at a time, to obatin an array with the motion vectors and SAD values
-        cudaMemcpyCheck(d_ref_frame, ref_frame, p.width*p.height * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_SearchArea");
-        cudaMemcpyCheck(d_curr_frame, curr_frame, p.width*p.height * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_CurrentBlock");
+        cudaMemcpyCheck(d_ref_frame, ref_frame_v, p.width*p.height * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_SearchArea");
+        cudaMemcpyCheck(d_curr_frame, curr_frame_v, p.width*p.height * sizeof(int), cudaMemcpyHostToDevice, "Failed to copy data to the device for d_CurrentBlock");
         MotionEstimation(motionVectors, d_curr_frame, d_ref_frame, curr_frame, ref_frame, p);
 
         // Recustruct the predicted frame using the obtained motion vectors
@@ -393,7 +403,7 @@ int main(int argc, char** argv) {
         for(int r = 0; r < p.height; r++)
             for(int c = 0; c < p.width; c++)
                 if(r > (p.height - p.blockSize + 1) || c > (p.width - p.blockSize + 1))
-                    rec_frame[r][c] = ref_frame[r*p.width+c];
+                    rec_frame[r][c] = ref_frame[r][c];
 
 
         // Compute residue block
